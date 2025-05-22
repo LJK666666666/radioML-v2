@@ -4,21 +4,19 @@ This repository contains machine learning models for radio modulation classifica
 
 ## Important Note
 
-**This repository only contains the source code for the models. The dataset and pre-trained models are not included due to their large size.**
+**This repository includes all source code, models, and data files. Large files are managed using Git LFS.**
 
 ## Project Structure
 
 - `src/`: Source code for all models
   - Models implementations (CNN 1D, CNN 2D, Complex NN, ResNet, Transformer)
   - Utility functions and callbacks
-
-## Missing Files
-
-The following files are not included in this repository due to GitHub's file size limitations:
-
-- `RML2016.10a_dict.pkl`: The RadioML dataset (> 600MB)
-- Model weights in `model_weight_saved/` and `output/models/` directories
-- Output plots and evaluation results
+- `model_weight_saved/`: Saved model weights (managed with Git LFS)
+- `output/models/`: Output model files (managed with Git LFS)
+- `RML2016.10a_dict.pkl`: The RadioML dataset (managed with Git LFS)
+- `projects/`: Contains submodules of related projects
+  - `AMC-Net`: Implementation of the AMC-Net architecture
+  - `ULCNN`: Implementation of the ULCNN architecture
 
 ## Getting Started
 
