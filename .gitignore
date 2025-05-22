@@ -1,7 +1,3 @@
-# External project repositories
-projects/AMC-Net/
-projects/ULCNN/
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
