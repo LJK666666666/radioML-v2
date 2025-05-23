@@ -42,6 +42,8 @@ def main():
                         help='Random seed for reproducibility')
     parser.add_argument('--augment_data', action='store_true',
                         help='Enable data augmentation for training data (11 rotations, 30 deg increments)')
+    parser.add_argument('--apply_gpr', action='store_true',
+                        help='Apply Gaussian Process Regression to the input signals during preprocessing.')
     
     args = parser.parse_args()
     
@@ -81,7 +83,8 @@ def main():
         print("="*50)
         X_train, X_val, X_test, y_train, y_val, y_test, snr_train, snr_val, snr_test, mods = prepare_data_by_snr(
             dataset, 
-            augment_data=args.augment_data
+            augment_data=args.augment_data,
+            apply_gpr=args.apply_gpr
         )
     
     # Training
