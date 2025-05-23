@@ -42,8 +42,11 @@ def main():
                         help='Random seed for reproducibility')
     parser.add_argument('--augment_data', action='store_true',
                         help='Enable data augmentation for training data (11 rotations, 30 deg increments)')
-    parser.add_argument('--apply_gpr', action='store_true',
-                        help='Apply Gaussian Process Regression to the input signals during preprocessing.')
+    parser.add_argument('--denoising_method', type=str, default='gpr',
+                        choices=['gpr', 'wavelet', 'ddae', 'none'],
+                        help='Denoising method to apply to the signals (gpr, wavelet, ddae, none)')
+    parser.add_argument('--ddae_model_path', type=str, default='model_weight_saved/ddae_model.keras',
+                        help='Path to the trained Denoising Autoencoder model (.keras file). Assumes path from project root.')
     
     args = parser.parse_args()
     
@@ -84,7 +87,8 @@ def main():
         X_train, X_val, X_test, y_train, y_val, y_test, snr_train, snr_val, snr_test, mods = prepare_data_by_snr(
             dataset, 
             augment_data=args.augment_data,
-            apply_gpr=args.apply_gpr
+            denoising_method=args.denoising_method,
+            ddae_model_path=args.ddae_model_path
         )
     
     # Training

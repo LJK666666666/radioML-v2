@@ -1,10 +1,13 @@
 import numpy as np
 import pickle
+import os # Added for os.path.exists
 from sklearn.model_selection import train_test_split
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF
+from sklearn.gaussian_process.kernels import RBF, Matern, RationalQuadratic
 from scipy.stats import norm
-from keras.utils import to_categorical
+from keras.utils import to_categorical # Changed from tensorflow.keras
+from keras.models import load_model # Changed from tensorflow.keras
+import pywt
 
 
 # Gaussian Process Regression Functions
@@ -18,13 +21,117 @@ def estimate_noise_std(signal_power, snr_db):
     noise_power = signal_power / snr_linear
     return np.sqrt(noise_power)
 
-def apply_gp_regression(complex_signal, noise_std, length_scale=1.0):
+def apply_wavelet_denoising(complex_signal, wavelet='db4', level=1, mode='soft'):
+    """
+    Apply Wavelet Denoising to a complex signal.
+    Args:
+        complex_signal (np.ndarray): Array of complex numbers representing the signal.
+        wavelet (str): Type of wavelet to use.
+        level (int): Decomposition level.
+        mode (str): Type of thresholding ('soft' or 'hard').
+    Returns:
+        np.ndarray: Denoised complex signal.
+    """
+    real_part = complex_signal.real
+    imag_part = complex_signal.imag
+
+    def denoise_part(part):
+        coeffs = pywt.wavedec(part, wavelet, level=level)
+        # Estimate noise std from the first level detail coefficients
+        sigma = np.median(np.abs(coeffs[-1] - np.median(coeffs[-1]))) / 0.6745
+        # Universal threshold
+        threshold = sigma * np.sqrt(2 * np.log(len(part)))
+        
+        denoised_coeffs = [coeffs[0]] # Keep approximation coefficients
+        for i in range(1, len(coeffs)):
+            denoised_coeffs.append(pywt.threshold(coeffs[i], threshold, mode=mode))
+            
+        return pywt.waverec(denoised_coeffs, wavelet)
+
+    denoised_real = denoise_part(real_part)
+    denoised_imag = denoise_part(imag_part)
+    
+    # Ensure the output length matches the input length
+    output_len = len(complex_signal)
+    if len(denoised_real) > output_len:
+        denoised_real = denoised_real[:output_len]
+    if len(denoised_imag) > output_len:
+        denoised_imag = denoised_imag[:output_len]
+        
+    return denoised_real + 1j * denoised_imag
+
+def apply_ddae_denoising(complex_signal, model_path='../model_weight_saved/ddae_model.keras'):
+    """
+    Apply Deep Denoising Autoencoder to denoise a complex signal.
+    Args:
+        complex_signal (np.ndarray): Array of complex numbers representing the signal.
+        model_path (str): Path to the trained DDAE model.
+                          Defaults to '../model_weight_saved/ddae_model.keras'.
+    Returns:
+        np.ndarray: Denoised complex signal, or original signal if model not found or error occurs.
+    """
+    if not os.path.exists(model_path):
+        print(f"Warning: DDAE model not found at {model_path}. Returning original signal.")
+        return complex_signal
+
+    try:
+        # Load the DAE model, compile=False for faster loading if only for inference
+        dae_model = load_model(model_path, compile=False)
+    except Exception as e:
+        print(f"Error loading DDAE model: {e}. Returning original signal.")
+        return complex_signal
+
+    # Preprocess Input Signal
+    real_part = complex_signal.real
+    imag_part = complex_signal.imag
+    signal_2channel = np.stack((real_part, imag_part), axis=-1) # Shape: (sequence_length, 2)
+
+    # Normalization
+    instance_max_val = np.max(np.abs(signal_2channel))
+    if instance_max_val == 0:
+        # Avoid division by zero for zero-signals; return as is.
+        # Or, could return np.zeros_like(complex_signal) if that's more appropriate.
+        print("Warning: Max value of signal is 0. Returning original signal.")
+        return complex_signal
+    
+    normalized_signal = signal_2channel / instance_max_val
+    
+    # Reshape for the model: (1, sequence_length, 2)
+    model_input = np.expand_dims(normalized_signal, axis=0)
+
+    # Predict with DAE
+    try:
+        denoised_output_normalized = dae_model.predict(model_input)
+    except Exception as e:
+        print(f"Error during DDAE model prediction: {e}. Returning original signal.")
+        return complex_signal
+
+    # Postprocess Output Signal
+    # Remove batch dimension: (sequence_length, 2)
+    denoised_squeezed = np.squeeze(denoised_output_normalized, axis=0)
+    
+    # Denormalization
+    denoised_signal_2channel = denoised_squeezed * instance_max_val
+    
+    # Extract denoised real and imaginary parts
+    denoised_real = denoised_signal_2channel[:, 0]
+    denoised_imag = denoised_signal_2channel[:, 1]
+    
+    # Reconstruct complex signal
+    final_denoised_signal = denoised_real + 1j * denoised_imag
+    
+    return final_denoised_signal
+
+def apply_gp_regression(complex_signal, noise_std, kernel_name='rbf', length_scale=1.0, matern_nu=1.5, rational_quadratic_alpha=1.0):
     """
     Apply Gaussian Process Regression to denoise a complex signal.
     Args:
         complex_signal (np.ndarray): Array of complex numbers representing the signal.
         noise_std (float): Estimated standard deviation of the noise.
-        length_scale (float): Length scale parameter for the RBF kernel.
+        kernel_name (str): Type of kernel ('rbf', 'matern', 'rational_quadratic').
+        length_scale (float): Length scale parameter for RBF, Matern, RationalQuadratic kernels.
+        matern_nu (float): Nu parameter for Matern kernel.
+        rational_quadratic_alpha (float): Alpha parameter for RationalQuadratic kernel.
     Returns:
         np.ndarray: Denoised complex signal.
     """
@@ -32,9 +139,16 @@ def apply_gp_regression(complex_signal, noise_std, length_scale=1.0):
     y_real = complex_signal.real
     y_imag = complex_signal.imag
 
-    # Kernel with noise level estimation
-    # alpha is the variance of the additional white noise
-    kernel = RBF(length_scale=length_scale, length_scale_bounds="fixed")
+    # Kernel selection
+    if kernel_name.lower() == 'rbf':
+        kernel = RBF(length_scale=length_scale, length_scale_bounds="fixed")
+    elif kernel_name.lower() == 'matern':
+        kernel = Matern(length_scale=length_scale, nu=matern_nu, length_scale_bounds="fixed")
+    elif kernel_name.lower() == 'rational_quadratic':
+        kernel = RationalQuadratic(length_scale=length_scale, alpha=rational_quadratic_alpha, length_scale_bounds="fixed")
+    else:
+        print(f"Warning: Kernel '{kernel_name}' not recognized. Using RBF kernel as default.")
+        kernel = RBF(length_scale=length_scale, length_scale_bounds="fixed")
 
     # Apply GPR to the real part
     gpr_real = GaussianProcessRegressor(kernel=kernel, alpha=noise_std**2, normalize_y=True)
@@ -201,7 +315,7 @@ def prepare_data(dataset, test_size=0.2, validation_split=0.1, snrs_filter=None,
 
 
 def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.1, specific_snrs=None,
-                        augment_data=False, apply_gpr=False):
+                        augment_data=False, denoising_method='gpr', ddae_model_path=None):
     """
     Organize data for training and testing, keeping samples separated by SNR.
     Useful for evaluating performance across different SNRs.
@@ -213,7 +327,7 @@ def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.1, specific_s
         validation_split: Proportion of training data to use for validation
         specific_snrs: List of SNR values to include (None=all)
         augment_data: Boolean flag to enable/disable data augmentation on training set
-        apply_gpr: Boolean flag to enable/disable Gaussian Process Regression
+        denoising_method (str): Denoising method to apply ('gpr', 'wavelet', 'ddae', 'none'). Defaults to 'gpr'.
 
     Returns:
         X_train, X_val, X_test: Training, validation and test data
@@ -250,37 +364,43 @@ def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.1, specific_s
     y_all = np.hstack(y_all_list).astype(int)
     snr_values_all = np.hstack(snr_values_all_list)
 
-    # Apply Gaussian Process Regression if enabled
-    if apply_gpr:
-        print("Applying Gaussian Process Regression to the dataset...")
+    # Apply denoising method
+    if denoising_method.lower() != 'none':
+        print(f"Applying {denoising_method} denoising to the dataset...")
         if X_all.shape[0] == 0:
-            print("X_all is empty. Skipping GPR.")
+            print("X_all is empty. Skipping denoising.")
         else:
             for i in range(X_all.shape[0]):
                 current_snr = snr_values_all[i]
                 i_component = X_all[i, 0, :]
                 q_component = X_all[i, 1, :]
-                
                 complex_signal = i_component + 1j * q_component
                 
-                # Calculate power using the existing function
-                total_power = calculate_power(i_component, q_component)
-                
-                # Estimate noise_std using the existing function
-                noise_std = estimate_noise_std(total_power, current_snr)
-                
-                # Determine length_scale based on SNR
-                length_scale_val = 5.0 if current_snr >= 0 else max(1.0, 5.0 * (1 + current_snr))
-                
-                # Apply GP regression using the existing function
-                # apply_gp_regression returns the denoised complex signal
-                predicted_signal = apply_gp_regression(complex_signal, noise_std, length_scale=length_scale_val)
-                
-                # Update data in X_all
-                X_all[i, 0, :] = np.real(predicted_signal)
-                X_all[i, 1, :] = np.imag(predicted_signal)
-            print("GPR application complete.")
-    
+                denoised_signal = complex_signal # Default to original if method unknown or fails
+
+                if denoising_method.lower() == 'gpr':
+                    total_power = calculate_power(i_component, q_component)
+                    noise_std = estimate_noise_std(total_power, current_snr)
+                    # TODO: Make kernel and its parameters configurable
+                    length_scale_val = 5.0 if current_snr >= 0 else max(1.0, 5.0 * (1 + current_snr / 20.0)) # Adjusted scaling for negative SNR
+                    denoised_signal = apply_gp_regression(complex_signal, noise_std, kernel_name='rbf', length_scale=length_scale_val)
+                elif denoising_method.lower() == 'wavelet':
+                    # TODO: Make wavelet parameters configurable
+                    denoised_signal = apply_wavelet_denoising(complex_signal, wavelet='db4', level=2) # Using level 2 for potentially better denoising
+                elif denoising_method.lower() == 'ddae':
+                    # Pass the model path received by prepare_data_by_snr
+                    denoised_signal = apply_ddae_denoising(complex_signal, model_path=ddae_model_path)
+                else:
+                    if i == 0: # Print warning only once
+                        print(f"Warning: Denoising method '{denoising_method}' not recognized. Skipping denoising.")
+                    denoised_signal = complex_signal # Fallback to original signal
+
+                X_all[i, 0, :] = np.real(denoised_signal)
+                X_all[i, 1, :] = np.imag(denoised_signal)
+            print(f"{denoising_method} application complete.")
+    else:
+        print("No denoising method applied.")
+        
     # Split data into training+validation and test sets
     X_train_val, X_test, y_train_val, y_test, snr_train_val, snr_test = train_test_split(
         X_all, y_all, snr_values_all, test_size=test_size, random_state=42, stratify=y_all
