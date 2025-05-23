@@ -1,8 +1,52 @@
 import numpy as np
 import pickle
 from sklearn.model_selection import train_test_split
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF
+from scipy.stats import norm
 from keras.utils import to_categorical
 
+
+# Gaussian Process Regression Functions
+def calculate_power(i_component, q_component):
+    """Calculate the power of the signal from I and Q components."""
+    return np.mean(i_component**2 + q_component**2)
+
+def estimate_noise_std(signal_power, snr_db):
+    """Estimate noise standard deviation from signal power and SNR."""
+    snr_linear = 10**(snr_db / 10)
+    noise_power = signal_power / snr_linear
+    return np.sqrt(noise_power)
+
+def apply_gp_regression(complex_signal, noise_std, length_scale=1.0):
+    """
+    Apply Gaussian Process Regression to denoise a complex signal.
+    Args:
+        complex_signal (np.ndarray): Array of complex numbers representing the signal.
+        noise_std (float): Estimated standard deviation of the noise.
+        length_scale (float): Length scale parameter for the RBF kernel.
+    Returns:
+        np.ndarray: Denoised complex signal.
+    """
+    X = np.arange(len(complex_signal)).reshape(-1, 1)
+    y_real = complex_signal.real
+    y_imag = complex_signal.imag
+
+    # Kernel with noise level estimation
+    # alpha is the variance of the additional white noise
+    kernel = RBF(length_scale=length_scale, length_scale_bounds="fixed")
+
+    # Apply GPR to the real part
+    gpr_real = GaussianProcessRegressor(kernel=kernel, alpha=noise_std**2, normalize_y=True)
+    gpr_real.fit(X, y_real)
+    y_real_denoised, _ = gpr_real.predict(X, return_std=True)
+
+    # Apply GPR to the imaginary part
+    gpr_imag = GaussianProcessRegressor(kernel=kernel, alpha=noise_std**2, normalize_y=True)
+    gpr_imag.fit(X, y_imag)
+    y_imag_denoised, _ = gpr_imag.predict(X, return_std=True)
+    
+    return y_real_denoised + 1j * y_imag_denoised
 
 def load_data(file_path):
     """Load RadioML dataset."""
@@ -157,7 +201,7 @@ def prepare_data(dataset, test_size=0.2, validation_split=0.1, snrs_filter=None,
 
 
 def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.1, specific_snrs=None,
-                        augment_data=False):
+                        augment_data=False, apply_gpr=False):
     """
     Organize data for training and testing, keeping samples separated by SNR.
     Useful for evaluating performance across different SNRs.
@@ -169,6 +213,7 @@ def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.1, specific_s
         validation_split: Proportion of training data to use for validation
         specific_snrs: List of SNR values to include (None=all)
         augment_data: Boolean flag to enable/disable data augmentation on training set
+        apply_gpr: Boolean flag to enable/disable Gaussian Process Regression
 
     Returns:
         X_train, X_val, X_test: Training, validation and test data
@@ -204,6 +249,37 @@ def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.1, specific_s
     X_all = np.vstack(X_all_list)
     y_all = np.hstack(y_all_list).astype(int)
     snr_values_all = np.hstack(snr_values_all_list)
+
+    # Apply Gaussian Process Regression if enabled
+    if apply_gpr:
+        print("Applying Gaussian Process Regression to the dataset...")
+        if X_all.shape[0] == 0:
+            print("X_all is empty. Skipping GPR.")
+        else:
+            for i in range(X_all.shape[0]):
+                current_snr = snr_values_all[i]
+                i_component = X_all[i, 0, :]
+                q_component = X_all[i, 1, :]
+                
+                complex_signal = i_component + 1j * q_component
+                
+                # Calculate power using the existing function
+                total_power = calculate_power(i_component, q_component)
+                
+                # Estimate noise_std using the existing function
+                noise_std = estimate_noise_std(total_power, current_snr)
+                
+                # Determine length_scale based on SNR
+                length_scale_val = 5.0 if current_snr >= 0 else max(1.0, 5.0 * (1 + current_snr))
+                
+                # Apply GP regression using the existing function
+                # apply_gp_regression returns the denoised complex signal
+                predicted_signal = apply_gp_regression(complex_signal, noise_std, length_scale=length_scale_val)
+                
+                # Update data in X_all
+                X_all[i, 0, :] = np.real(predicted_signal)
+                X_all[i, 1, :] = np.imag(predicted_signal)
+            print("GPR application complete.")
     
     # Split data into training+validation and test sets
     X_train_val, X_test, y_train_val, y_test, snr_train_val, snr_test = train_test_split(
