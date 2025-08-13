@@ -8,12 +8,23 @@ import pandas as pd
 
 from preprocess import load_data, prepare_data_by_snr
 from models import build_cnn1d_model, build_cnn2d_model, build_resnet_model, build_complex_nn_model, build_transformer_model
+# Import custom layers for model loading
+from model.complex_nn_model import ComplexConv1D, ComplexBatchNormalization, ComplexDense, ComplexMagnitude, complex_relu
 
 
 def load_trained_model(model_path):
     """Load a trained model from disk."""
     try:
-        model = tf.keras.models.load_model(model_path)
+        # Create custom objects dict for complex layers
+        custom_objects = {
+            'ComplexConv1D': ComplexConv1D,
+            'ComplexBatchNormalization': ComplexBatchNormalization,
+            'ComplexDense': ComplexDense,
+            'ComplexMagnitude': ComplexMagnitude,
+            'complex_relu': complex_relu
+        }
+        
+        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
         print(f"Successfully loaded model from {model_path}")
         return model
     except Exception as e:
@@ -47,6 +58,14 @@ def evaluate_by_snr(model, X_test, y_test, snr_test, mods, output_dir):
     accuracy = np.mean(y_pred_classes == y_true)
     print(f"Overall accuracy: {accuracy:.4f}")
     
+    # Save overall accuracy to file
+    with open(os.path.join(output_dir, 'overall_accuracy.txt'), 'w') as f:
+        f.write(f"Overall Accuracy: {accuracy:.4f}\n")
+        f.write(f"Total samples: {len(y_true)}\n")
+        f.write(f"Correct predictions: {np.sum(y_pred_classes == y_true)}\n")
+    
+    print(f"Overall accuracy saved to {os.path.join(output_dir, 'overall_accuracy.txt')}")
+    
     # Get unique SNR values
     snrs = np.unique(snr_test)
     
@@ -77,6 +96,28 @@ def evaluate_by_snr(model, X_test, y_test, snr_test, mods, output_dir):
     # Save accuracy by SNR to CSV
     df = pd.DataFrame({'SNR': snrs, 'Accuracy': snr_accuracies})
     df.to_csv(os.path.join(output_dir, 'accuracy_by_snr.csv'), index=False)
+    
+    # Save comprehensive results summary
+    with open(os.path.join(output_dir, 'evaluation_summary.txt'), 'w') as f:
+        f.write("EVALUATION SUMMARY\n")
+        f.write("="*50 + "\n\n")
+        f.write(f"Overall Accuracy: {accuracy:.4f}\n")
+        f.write(f"Total Samples: {len(y_true)}\n")
+        f.write(f"Correct Predictions: {np.sum(y_pred_classes == y_true)}\n")
+        f.write(f"Number of SNR Values: {len(snrs)}\n")
+        f.write(f"SNR Range: {snrs.min()} to {snrs.max()} dB\n\n")
+        
+        f.write("ACCURACY BY SNR:\n")
+        f.write("-"*30 + "\n")
+        for snr, acc in zip(snrs, snr_accuracies):
+            f.write(f"SNR {snr:2.0f} dB: {acc:.4f}\n")
+        f.write("\n")
+        
+        f.write(f"Best SNR Performance: {snrs[np.argmax(snr_accuracies)]} dB ({max(snr_accuracies):.4f})\n")
+        f.write(f"Worst SNR Performance: {snrs[np.argmin(snr_accuracies)]} dB ({min(snr_accuracies):.4f})\n")
+        f.write(f"Average SNR Accuracy: {np.mean(snr_accuracies):.4f}\n")
+    
+    print(f"Evaluation summary saved to {os.path.join(output_dir, 'evaluation_summary.txt')}")
     
     # Create confusion matrix
     cm = confusion_matrix(y_true, y_pred_classes)

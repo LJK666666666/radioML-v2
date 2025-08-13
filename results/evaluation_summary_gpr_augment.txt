@@ -1,0 +1,12 @@
+RadioML Signal Classification - Evaluation Summary
+==================================================
+Dataset: ../RML2016.10a_dict.pkl
+Denoising method: gpr
+Data augmentation: True
+Random seed: 42
+Test set size: 44000 samples
+Number of classes: 11
+SNR range: -20.0 to 18.0 dB
+
+Model Performance:
+  COMPLEX_NN  : Not evaluated

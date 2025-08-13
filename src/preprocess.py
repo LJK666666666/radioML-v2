@@ -1,6 +1,7 @@
 import numpy as np
 import pickle
 import os # Added for os.path.exists
+import hashlib # Added for creating unique filenames
 from sklearn.model_selection import train_test_split
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, Matern, RationalQuadratic
@@ -8,6 +9,91 @@ from scipy.stats import norm
 from keras.utils import to_categorical # Changed from tensorflow.keras
 from keras.models import load_model # Changed from tensorflow.keras
 import pywt
+
+
+# Helper functions for saving/loading denoised datasets
+def create_denoised_filename(denoising_method, specific_snrs=None, ddae_model_path=None):
+    """
+    Create a unique filename for denoised dataset based on parameters.
+    Args:
+        denoising_method (str): The denoising method used
+        specific_snrs (list): List of specific SNRs used
+        ddae_model_path (str): Path to DDAE model if used
+    Returns:
+        str: Unique filename for the denoised dataset
+    """
+    # Create a string representing the configuration
+    config_str = f"method_{denoising_method}"
+    
+    if specific_snrs is not None:
+        snrs_str = "_".join(map(str, sorted(specific_snrs)))
+        config_str += f"_snrs_{snrs_str}"
+    else:
+        config_str += "_snrs_all"
+    
+    if denoising_method.lower() == 'ddae' and ddae_model_path:
+        # Add model path hash to distinguish different DDAE models
+        model_hash = hashlib.md5(ddae_model_path.encode()).hexdigest()[:8]
+        config_str += f"_model_{model_hash}"
+    
+    # Create hash of the configuration for shorter filename
+    config_hash = hashlib.md5(config_str.encode()).hexdigest()[:12]
+    
+    return f"denoised_data_{denoising_method}_{config_hash}.pkl"
+
+def save_denoised_dataset(X_all, y_all, snr_values_all, filename, denoised_dir):
+    """
+    Save denoised dataset to file.
+    Args:
+        X_all (np.ndarray): Denoised feature data
+        y_all (np.ndarray): Labels
+        snr_values_all (np.ndarray): SNR values
+        filename (str): Filename to save to
+        denoised_dir (str): Directory to save in
+    """
+    os.makedirs(denoised_dir, exist_ok=True)
+    filepath = os.path.join(denoised_dir, filename)
+    
+    data_to_save = {
+        'X_all': X_all,
+        'y_all': y_all,
+        'snr_values_all': snr_values_all
+    }
+    
+    print(f"Saving denoised dataset to {filepath}...")
+    with open(filepath, 'wb') as f:
+        pickle.dump(data_to_save, f)
+    print(f"Denoised dataset saved successfully.")
+
+def load_denoised_dataset(filename, denoised_dir):
+    """
+    Load denoised dataset from file.
+    Args:
+        filename (str): Filename to load from
+        denoised_dir (str): Directory to load from
+    Returns:
+        tuple: (X_all, y_all, snr_values_all) or None if file doesn't exist
+    """
+    filepath = os.path.join(denoised_dir, filename)
+    
+    if not os.path.exists(filepath):
+        return None
+    
+    print(f"Loading existing denoised dataset from {filepath}...")
+    try:
+        with open(filepath, 'rb') as f:
+            data = pickle.load(f)
+        
+        X_all = data['X_all']
+        y_all = data['y_all']
+        snr_values_all = data['snr_values_all']
+        
+        print(f"Denoised dataset loaded successfully. Shape: {X_all.shape}")
+        return X_all, y_all, snr_values_all
+    
+    except Exception as e:
+        print(f"Error loading denoised dataset: {e}")
+        return None
 
 
 # Gaussian Process Regression Functions
@@ -18,8 +104,8 @@ def calculate_power(i_component, q_component):
 def estimate_noise_std(signal_power, snr_db):
     """Estimate noise standard deviation from signal power and SNR."""
     snr_linear = 10**(snr_db / 10)
-    noise_power = signal_power / snr_linear
-    return np.sqrt(noise_power)
+    noise_power = signal_power / (snr_linear + 1)
+    return np.sqrt(noise_power / 2)
 
 def apply_wavelet_denoising(complex_signal, wavelet='db4', level=1, mode='soft'):
     """
@@ -122,7 +208,9 @@ def apply_ddae_denoising(complex_signal, model_path='../model_weight_saved/ddae_
     
     return final_denoised_signal
 
-def apply_gp_regression(complex_signal, noise_std, kernel_name='rbf', length_scale=1.0, matern_nu=1.5, rational_quadratic_alpha=1.0):
+# def apply_gp_regression(complex_signal, noise_std, kernel_name='rbf', length_scale=1.0, matern_nu=1.5, rational_quadratic_alpha=1.0):
+def apply_gp_regression(complex_signal, noise_std, kernel_name='rbf', length_scale=50, matern_nu=1.5, rational_quadratic_alpha=1.0):
+
     """
     Apply Gaussian Process Regression to denoise a complex signal.
     Args:
@@ -314,8 +402,12 @@ def prepare_data(dataset, test_size=0.2, validation_split=0.1, snrs_filter=None,
     return X_train, X_val, X_test, y_train, y_val, y_test, mods
 
 
+# def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.15, specific_snrs=None,
+#                         augment_data=False, denoising_method='gpr', ddae_model_path=None,
+#                         denoised_cache_dir='../denoised_datasets'):
 def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.1, specific_snrs=None,
-                        augment_data=False, denoising_method='gpr', ddae_model_path=None):
+                        augment_data=False, denoising_method='gpr', ddae_model_path=None,
+                        denoised_cache_dir='../denoised_datasets'):
     """
     Organize data for training and testing, keeping samples separated by SNR.
     Useful for evaluating performance across different SNRs.
@@ -328,6 +420,8 @@ def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.1, specific_s
         specific_snrs: List of SNR values to include (None=all)
         augment_data: Boolean flag to enable/disable data augmentation on training set
         denoising_method (str): Denoising method to apply ('gpr', 'wavelet', 'ddae', 'none'). Defaults to 'gpr'.
+        ddae_model_path (str): Path to the trained DDAE model if using 'ddae' method.
+        denoised_cache_dir (str): Directory to save/load denoised datasets. Defaults to '../denoised_datasets'.
 
     Returns:
         X_train, X_val, X_test: Training, validation and test data
@@ -364,40 +458,70 @@ def prepare_data_by_snr(dataset, test_size=0.2, validation_split=0.1, specific_s
     y_all = np.hstack(y_all_list).astype(int)
     snr_values_all = np.hstack(snr_values_all_list)
 
-    # Apply denoising method
+    # Check for cached denoised data and apply denoising if needed
     if denoising_method.lower() != 'none':
-        print(f"Applying {denoising_method} denoising to the dataset...")
-        if X_all.shape[0] == 0:
-            print("X_all is empty. Skipping denoising.")
+        # Generate filename for cached denoised data
+        denoised_filename = create_denoised_filename(denoising_method, specific_snrs, ddae_model_path)
+        print(f"Checking for cached denoised data: {denoised_filename}")
+        
+        # Try to load existing denoised data
+        cached_data = load_denoised_dataset(denoised_filename, denoised_cache_dir)
+        
+        if cached_data is not None:
+            print("Using cached denoised dataset.")
+            X_all, y_all, snr_values_all = cached_data
         else:
-            for i in range(X_all.shape[0]):
-                current_snr = snr_values_all[i]
-                i_component = X_all[i, 0, :]
-                q_component = X_all[i, 1, :]
-                complex_signal = i_component + 1j * q_component
+            print(f"No cached data found. Applying {denoising_method} denoising to the dataset...")
+            if X_all.shape[0] == 0:
+                print("X_all is empty. Skipping denoising.")
+            else:
+                # Apply denoising (original processing code)
+                total_samples = X_all.shape[0]
+                progress_step = max(1, total_samples // 100)  # Calculate 1% step
+                print(f"Total samples to process: {total_samples}")
                 
-                denoised_signal = complex_signal # Default to original if method unknown or fails
+                for i in range(X_all.shape[0]):
+                    # Progress display every 1% of data
+                    if i % progress_step == 0 or i == total_samples - 1:
+                        progress_percent = (i + 1) / total_samples * 100
+                        print(f"Processing sample {i+1}/{total_samples} ({progress_percent:.1f}% complete)")
+                    
+                    current_snr = snr_values_all[i]
+                    i_component = X_all[i, 0, :]
+                    q_component = X_all[i, 1, :]
+                    complex_signal = i_component + 1j * q_component
+                    
+                    denoised_signal = complex_signal # Default to original if method unknown or fails
 
-                if denoising_method.lower() == 'gpr':
-                    total_power = calculate_power(i_component, q_component)
-                    noise_std = estimate_noise_std(total_power, current_snr)
-                    # TODO: Make kernel and its parameters configurable
-                    length_scale_val = 5.0 if current_snr >= 0 else max(1.0, 5.0 * (1 + current_snr / 20.0)) # Adjusted scaling for negative SNR
-                    denoised_signal = apply_gp_regression(complex_signal, noise_std, kernel_name='rbf', length_scale=length_scale_val)
-                elif denoising_method.lower() == 'wavelet':
-                    # TODO: Make wavelet parameters configurable
-                    denoised_signal = apply_wavelet_denoising(complex_signal, wavelet='db4', level=2) # Using level 2 for potentially better denoising
-                elif denoising_method.lower() == 'ddae':
-                    # Pass the model path received by prepare_data_by_snr
-                    denoised_signal = apply_ddae_denoising(complex_signal, model_path=ddae_model_path)
-                else:
-                    if i == 0: # Print warning only once
-                        print(f"Warning: Denoising method '{denoising_method}' not recognized. Skipping denoising.")
-                    denoised_signal = complex_signal # Fallback to original signal
+                    if denoising_method.lower() == 'gpr':
+                        total_power = calculate_power(i_component, q_component)
+                        noise_std = estimate_noise_std(total_power, current_snr)
+                        # TODO: Make kernel and its parameters configurable
+                        # Corrected logic: Higher length_scale for lower SNR (more smoothing for noisier signals)
+                        # length_scale_val = 5.0 if current_snr >= 0 else max(1.0, 5.0 * (1 + current_snr / 20.0))
+                        # length_scale_val = 5.0 if current_snr >= 0 else min(50.0, 5.0 - current_snr * 2.5) 
+                        # length_scale_val = 50.0
+                        # length_scale_val = 5.0
+                        length_scale_val = 5.0 if current_snr >= 0 else min(10, 5.0 - current_snr * 0.25) 
+                        denoised_signal = apply_gp_regression(complex_signal, noise_std, kernel_name='rbf', length_scale=length_scale_val)
+                    elif denoising_method.lower() == 'wavelet':
+                        # TODO: Make wavelet parameters configurable
+                        denoised_signal = apply_wavelet_denoising(complex_signal, wavelet='db4', level=2) # Using level 2 for potentially better denoising
+                    elif denoising_method.lower() == 'ddae':
+                        # Pass the model path received by prepare_data_by_snr
+                        denoised_signal = apply_ddae_denoising(complex_signal, model_path=ddae_model_path)
+                    else:
+                        if i == 0: # Print warning only once
+                            print(f"Warning: Denoising method '{denoising_method}' not recognized. Skipping denoising.")
+                        denoised_signal = complex_signal # Fallback to original signal
 
-                X_all[i, 0, :] = np.real(denoised_signal)
-                X_all[i, 1, :] = np.imag(denoised_signal)
-            print(f"{denoising_method} application complete.")
+                    X_all[i, 0, :] = np.real(denoised_signal)
+                    X_all[i, 1, :] = np.imag(denoised_signal)
+                
+                print(f"{denoising_method} application complete.")
+                
+                # Save the denoised dataset for future use
+                save_denoised_dataset(X_all, y_all, snr_values_all, denoised_filename, denoised_cache_dir)
     else:
         print("No denoising method applied.")
         

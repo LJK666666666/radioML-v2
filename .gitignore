@@ -19,3 +19,11 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Large data files
+*.pkl
+denoised_datasets/
+model_weight_saved/
+output/models/
+output/exploration/
+output/training_plots/

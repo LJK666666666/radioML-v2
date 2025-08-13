@@ -3,8 +3,8 @@ from keras.models import Model
 from keras.layers import Input, Dense, Dropout
 from keras.layers import MultiHeadAttention, LayerNormalization, Add, Permute
 from keras.optimizers import Adam
-
-def build_transformer_model(input_shape, num_classes, num_heads=4, ff_dim=32, num_transformer_blocks=1, embed_dim=32, dropout_rate=0.1):
+ 
+def build_transformer_model(input_shape, num_classes, num_heads=4, ff_dim=64, num_transformer_blocks=1, embed_dim=64, dropout_rate=0.1):
     """
     Build a Transformer-based model for radio signal classification.
     
